@@ -1,0 +1,40 @@
+# .github/workflows/job-scan.yml
+# Runs the Web3 job scanner daily and sends results to Telegram
+#
+# Required secrets (add in repo Settings → Secrets):
+#   ANTHROPIC_API_KEY - Your Anthropic API key
+#   BOT_TOKEN         - Telegram bot token from @BotFather
+#   CHANNEL_ID        - Telegram channel ID (e.g. @ubong_jobs)
+
+name: Daily Web3 Job Scan
+
+on:
+  schedule:
+    # Runs at 9:00 AM UTC every day (10 AM WAT / Lagos time)
+    - cron: '0 9 * * *'
+  
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+
+jobs:
+  scan-jobs:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run job scanner
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: python job_scanner.py
