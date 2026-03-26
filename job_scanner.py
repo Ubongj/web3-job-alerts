@@ -1,22 +1,13 @@
 """
-Web3 Job Scanner → Telegram Bot
-Scans 13 crypto job boards using Claude AI web search,
-filters for growth/content/video/community roles,
-and sends matching jobs to your Telegram channel.
+Web3 Job Scanner v3 → Telegram Bot
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Runs targeted searches across crypto job boards,
+extracts real listings, and sends them to Telegram.
 
-Setup:
-1. Create a Telegram bot via @BotFather → get BOT_TOKEN
-2. Create a channel → add bot as admin → get CHANNEL_ID
-3. Get an Anthropic API key from console.anthropic.com
-4. Set environment variables (or edit the values below)
-
-Run manually:
-    python job_scanner.py
-
-Automate via cron (every day at 9 AM):
-    0 9 * * * cd /path/to/folder && python3 job_scanner.py >> job_scan.log 2>&1
-
-Or use GitHub Actions (see .github/workflows/job-scan.yml)
+v3 fix: Instead of dumping 36 URLs into one prompt,
+we run focused keyword searches that Claude's web search
+can actually find — like a human googling for jobs.
+Each batch = 1 API call = 1 focused search query.
 """
 
 import requests
@@ -31,68 +22,85 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@your_channel_name")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "YOUR_API_KEY_HERE")
 
-# Your profile keywords — edit these to match your skills
-ROLE_KEYWORDS = [
-    "growth marketing", "content marketing", "video content",
-    "community lead", "TikTok", "short-form video",
-    "content strategist", "content creator", "community manager",
-    "growth lead", "social media manager", "content lead",
-    "marketing manager", "video editor", "video producer"
+EXCLUDE_ROLES = [
+    "solidity", "smart contract dev", "rust dev",
+    "backend engineer", "frontend dev", "devops",
+    "data engineer", "QA engineer", "security auditor",
+    "machine learning", "quantitative", "infra engineer"
 ]
 
-INDUSTRY_KEYWORDS = ["crypto", "web3", "blockchain", "defi", "nft"]
+# ━━━ SEARCH BATCHES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Each batch = one API call. Queries written like Google
+# searches so web search returns actual job listings.
 
-EXCLUDE_KEYWORDS = [
-    "solidity developer", "smart contract developer",
-    "backend engineer", "frontend developer", "devops"
+SEARCH_BATCHES = [
+    {
+        "name": "Web3.career — Marketing & Growth",
+        "query": "site:web3.career content marketing OR growth marketing OR marketing manager OR growth lead remote"
+    },
+    {
+        "name": "Web3.career — Video & Community",
+        "query": "site:web3.career video OR community manager OR community lead OR social media remote"
+    },
+    {
+        "name": "CryptoJobsList — All marketing",
+        "query": "site:cryptojobslist.com marketing OR content OR community OR growth job remote"
+    },
+    {
+        "name": "CryptocurrencyJobs.co",
+        "query": "site:cryptocurrencyjobs.co marketing OR content OR community OR growth job"
+    },
+    {
+        "name": "Crypto growth & content roles",
+        "query": "web3 crypto \"growth lead\" OR \"content marketing manager\" OR \"content lead\" remote job 2026"
+    },
+    {
+        "name": "Crypto video & TikTok roles",
+        "query": "crypto blockchain \"video content\" OR \"TikTok\" OR \"video strategist\" OR \"creative producer\" remote job 2026"
+    },
+    {
+        "name": "Crypto community & social roles",
+        "query": "web3 crypto \"community lead\" OR \"community manager\" OR \"social media lead\" remote job 2026"
+    },
+    {
+        "name": "LinkedIn & Wellfound",
+        "query": "site:linkedin.com/jobs OR site:wellfound.com web3 crypto content OR marketing OR growth remote 2026"
+    },
+    {
+        "name": "Greenhouse & Lever (direct company boards)",
+        "query": "site:greenhouse.io OR site:lever.co crypto OR web3 OR blockchain marketing OR content OR community OR growth"
+    },
+    {
+        "name": "Brand, partnerships & BD roles",
+        "query": "web3 crypto \"brand evangelist\" OR \"partnerships manager\" OR \"business development\" OR \"country manager\" remote job 2026"
+    },
 ]
 
-# Job boards to scan
-SOURCES = [
-    "web3.career/content-marketing-jobs",
-    "web3.career/growth-jobs",
-    "web3.career/marketing+remote-jobs",
-    "web3.career/remote+video-jobs",
-    "web3.career/community-manager-jobs",
-    "cryptojobslist.com/marketing",
-    "cryptojobslist.com/remote_marketing",
-    "cryptocurrencyjobs.co/marketing/",
-    "hireweb3.io",
-    "wellfound.com/role/crypto-marketing",
-    "remoteok.com/remote-crypto-jobs",
-    "crypto.jobs",
-    "cryptojobs.com/web3",
-]
+# ━━━ SEARCH ENGINE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# ━━━ SCANNER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def search_batch(batch):
+    """Run one targeted search via Claude web search."""
 
-def search_jobs():
-    """Use Claude with web search to find matching jobs."""
-    
-    role_str = ", ".join(ROLE_KEYWORDS)
-    source_str = "\n".join(f"- {s}" for s in SOURCES)
-    
-    prompt = f"""You are a job search assistant. Search for NEW Web3/crypto job listings 
-posted in the last 3 days across these job boards:
+    prompt = f"""Search the web for: {batch['query']}
 
-{source_str}
+Find ACTUAL job postings from the results. For each real job listing:
+- title: Exact job title
+- company: Company name
+- salary: Salary if shown, or "Not listed"
+- location: Location or "Remote"
+- url: Direct link to the job posting (NOT a homepage)
+- source: Website domain (e.g. "web3.career")
 
-Look for roles matching these keywords: {role_str}
-The roles MUST be in the crypto/web3/blockchain space.
-Remote roles preferred. Exclude pure developer/engineering roles.
+CRITICAL RULES:
+1. ONLY include real job postings you found in search results
+2. Do NOT invent or guess jobs — only report what you actually see
+3. Skip articles, guides, blog posts — only actual job listings
+4. Skip engineering/developer/solidity roles
+5. Max 10 jobs per search
 
-For each job found, extract:
-- title: Job title
-- company: Company name  
-- salary: Salary range (or "Not listed")
-- location: Location (or "Remote")
-- url: Direct link to apply
-- source: Which job board it was found on
-
-IMPORTANT: Return ONLY a valid JSON array. No markdown, no explanation, no code fences.
-Just the raw JSON array like: [{{"title":"...","company":"...","salary":"...","location":"...","url":"...","source":"..."}}]
-
-If you find no new jobs, return an empty array: []"""
+Return ONLY a JSON array. No text. No markdown. No code fences.
+Zero jobs = return exactly: []
+Example: [{{"title":"Growth Lead","company":"Acme","salary":"$80k","location":"Remote","url":"https://web3.career/job/123","source":"web3.career"}}]"""
 
     try:
         resp = requests.post(
@@ -106,169 +114,233 @@ If you find no new jobs, return an empty array: []"""
                 "model": "claude-sonnet-4-20250514",
                 "max_tokens": 4000,
                 "tools": [
-                    {
-                        "type": "web_search_20250305",
-                        "name": "web_search"
-                    }
+                    {"type": "web_search_20250305", "name": "web_search"}
                 ],
                 "messages": [
                     {"role": "user", "content": prompt}
                 ]
             },
-            timeout=120
+            timeout=180
         )
-        
+
         resp.raise_for_status()
         data = resp.json()
-        
-        # Extract text from response blocks
+
+        # Extract text from response
         text_parts = []
         for block in data.get("content", []):
             if block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
-        
+
         full_text = " ".join(text_parts).strip()
-        
-        # Clean up potential markdown fences
+
+        # Clean markdown fences
         if "```" in full_text:
-            full_text = full_text.split("```json")[-1].split("```")[0].strip()
-        
-        # Find JSON array in response
+            for part in full_text.split("```"):
+                cleaned = part.strip()
+                if cleaned.startswith("json"):
+                    cleaned = cleaned[4:].strip()
+                if cleaned.startswith("["):
+                    full_text = cleaned
+                    break
+
+        # Parse JSON array
         start = full_text.find("[")
         end = full_text.rfind("]") + 1
         if start >= 0 and end > start:
-            json_str = full_text[start:end]
-            jobs = json.loads(json_str)
-            return jobs
-        
-        print(f"No JSON array found in response: {full_text[:200]}")
+            jobs = json.loads(full_text[start:end])
+            if isinstance(jobs, list):
+                return jobs
+
+        print(f"  ⚠ No JSON found in response")
         return []
-        
+
+    except requests.exceptions.Timeout:
+        print(f"  ⏱ Timeout")
+        return []
     except requests.exceptions.RequestException as e:
-        print(f"API request failed: {e}")
+        print(f"  ❌ API error: {e}")
         return []
     except json.JSONDecodeError as e:
-        print(f"JSON parse failed: {e}")
-        print(f"Raw text: {full_text[:500]}")
+        print(f"  ❌ JSON parse error: {e}")
         return []
+
+
+def search_all():
+    """Run all batches with delays between each."""
+    all_jobs = []
+
+    for i, batch in enumerate(SEARCH_BATCHES):
+        print(f"\n[{i+1}/{len(SEARCH_BATCHES)}] 🔍 {batch['name']}")
+        jobs = search_batch(batch)
+        print(f"  → {len(jobs)} jobs found")
+        all_jobs.extend(jobs)
+
+        # 5s pause between calls to avoid rate limits
+        if i < len(SEARCH_BATCHES) - 1:
+            time.sleep(5)
+
+    return all_jobs
+
+
+# ━━━ PROCESSING ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def deduplicate(jobs):
+    """Remove duplicate jobs by title+company."""
+    seen = set()
+    unique = []
+    for job in jobs:
+        key = (
+            job.get("title", "").lower().strip(),
+            job.get("company", "").lower().strip()
+        )
+        if key not in seen and key != ("", ""):
+            seen.add(key)
+            unique.append(job)
+    return unique
 
 
 def filter_jobs(jobs):
-    """Filter out irrelevant jobs."""
+    """Remove irrelevant or malformed entries."""
     filtered = []
     for job in jobs:
-        title_lower = job.get("title", "").lower()
-        
-        # Skip excluded roles
-        if any(exc in title_lower for exc in EXCLUDE_KEYWORDS):
+        title = job.get("title", "").lower()
+
+        # Must have title and company
+        if not job.get("title") or not job.get("company"):
             continue
-        
+
+        # Skip excluded roles
+        if any(exc in title for exc in EXCLUDE_ROLES):
+            continue
+
         filtered.append(job)
-    
     return filtered
 
 
-def format_telegram_message(job):
-    """Format a job as a Telegram message."""
-    title = job.get("title", "Unknown Role")
+# ━━━ TELEGRAM ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def send_telegram(message):
+    """Send a message to Telegram channel."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+    try:
+        resp = requests.post(url, json={
+            "chat_id": CHANNEL_ID,
+            "text": message,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        })
+
+        if resp.status_code != 200:
+            # Fallback: plain text (strip markdown)
+            plain = message.replace("*", "").replace("_", "")
+            resp = requests.post(url, json={
+                "chat_id": CHANNEL_ID,
+                "text": plain,
+                "disable_web_page_preview": True
+            })
+
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"  Telegram error: {e}")
+        return False
+
+
+def format_job(job):
+    """Format a job for Telegram."""
+    title = job.get("title", "Unknown")
     company = job.get("company", "Unknown")
     salary = job.get("salary", "Not listed")
     location = job.get("location", "Remote")
     url = job.get("url", "#")
     source = job.get("source", "")
-    
-    msg = (
-        f"🚀 *{escape_md(title)}*\n"
-        f"🏢 {escape_md(company)}\n"
-        f"💰 {escape_md(salary)}\n"
-        f"📍 {escape_md(location)}\n"
-    )
-    
+
+    lines = [
+        f"🚀 *{title}*",
+        f"🏢 {company}",
+        f"💰 {salary}",
+        f"📍 {location}",
+    ]
     if source:
-        msg += f"📡 {escape_md(source)}\n"
-    
-    msg += f"\n🔗 [Apply Now]({url})"
-    
-    return msg
+        lines.append(f"📡 {source}")
+    lines.append(f"\n🔗 [Apply Now]({url})")
 
-
-def escape_md(text):
-    """Escape markdown special characters for Telegram."""
-    for char in ["_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"]:
-        text = text.replace(char, f"\\{char}")
-    return text
-
-
-def send_to_telegram(message):
-    """Send a message to the Telegram channel."""
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    
-    try:
-        resp = requests.post(url, json={
-            "chat_id": CHANNEL_ID,
-            "text": message,
-            "parse_mode": "MarkdownV2",
-            "disable_web_page_preview": True
-        })
-        
-        if resp.status_code != 200:
-            # Fallback: send without markdown
-            resp = requests.post(url, json={
-                "chat_id": CHANNEL_ID,
-                "text": message.replace("\\", "").replace("*", "").replace("_", ""),
-                "disable_web_page_preview": True
-            })
-        
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"Telegram send failed: {e}")
-        return False
-
-
-def send_summary(total_found, total_sent):
-    """Send a daily summary message."""
-    now = datetime.now().strftime("%B %d, %Y %I:%M %p")
-    msg = (
-        f"📊 *Daily Job Scan Summary*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 {escape_md(now)}\n"
-        f"🔍 Sources scanned: {len(SOURCES)}\n"
-        f"📋 Jobs found: {total_found}\n"
-        f"✅ Jobs sent: {total_sent}\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
-    )
-    send_to_telegram(msg)
+    return "\n".join(lines)
 
 
 # ━━━ MAIN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def main():
-    print(f"[{datetime.now()}] Starting Web3 job scan...")
-    print(f"Scanning {len(SOURCES)} sources...")
-    
+    now = datetime.now()
+    print(f"{'='*50}")
+    print(f"Web3 Job Scanner v3")
+    print(f"{now.strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"{len(SEARCH_BATCHES)} targeted searches queued")
+    print(f"{'='*50}")
+
     # Search
-    jobs = search_jobs()
-    print(f"Found {len(jobs)} raw jobs")
-    
+    all_jobs = search_all()
+    raw_count = len(all_jobs)
+    print(f"\n📋 Raw total: {raw_count}")
+
+    # Deduplicate
+    all_jobs = deduplicate(all_jobs)
+    dedup_count = len(all_jobs)
+    print(f"🧹 After dedup: {dedup_count}")
+
     # Filter
-    jobs = filter_jobs(jobs)
-    print(f"After filtering: {len(jobs)} matching jobs")
-    
-    # Send to Telegram
+    all_jobs = filter_jobs(all_jobs)
+    final_count = len(all_jobs)
+    print(f"🎯 After filter: {final_count}")
+
+    # No results
+    if final_count == 0:
+        print("\n😔 No matching jobs found.")
+        send_telegram(
+            f"📊 *Job Scan — {now.strftime('%b %d, %H:%M')} UTC*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🔍 Ran {len(SEARCH_BATCHES)} searches\n"
+            f"📋 Raw results: {raw_count}\n"
+            f"🎯 After filter: 0 matching jobs\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"_Next scan in ~12 hours._"
+        )
+        return
+
+    # Send header
+    send_telegram(
+        f"🔔 *{final_count} Web3 Jobs Found!*\n"
+        f"_{now.strftime('%b %d, %Y — %H:%M')} UTC_\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+    time.sleep(1)
+
+    # Send each job
     sent = 0
-    for job in jobs:
-        msg = format_telegram_message(job)
-        if send_to_telegram(msg):
+    for job in all_jobs:
+        msg = format_job(job)
+        if send_telegram(msg):
             sent += 1
-            print(f"  ✅ Sent: {job.get('title', 'Unknown')}")
+            print(f"  ✅ {job.get('title')} @ {job.get('company')}")
         else:
-            print(f"  ❌ Failed: {job.get('title', 'Unknown')}")
-        time.sleep(1.5)  # Rate limit
-    
-    # Send summary
-    send_summary(len(jobs), sent)
-    
-    print(f"\nDone! Sent {sent}/{len(jobs)} jobs to Telegram.")
+            print(f"  ❌ {job.get('title')}")
+        time.sleep(1.5)
+
+    # Summary
+    time.sleep(1)
+    send_telegram(
+        f"📊 *Scan Complete*\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🔍 Searches: {len(SEARCH_BATCHES)}\n"
+        f"📋 Raw → Dedup → Final: {raw_count} → {dedup_count} → {final_count}\n"
+        f"✅ Sent: {sent}\n"
+        f"━━━━━━━━━━━━━━━━━━"
+    )
+
+    print(f"\n{'='*50}")
+    print(f"Done! {sent}/{final_count} sent to Telegram.")
+    print(f"{'='*50}")
 
 
 if __name__ == "__main__":
